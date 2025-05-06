@@ -1,0 +1,113 @@
+---
+- name: Deploy and test Docker container
+  hosts: localhost
+  become: yes
+  vars:
+    user_name: "{{ ansible_user_id }}" 
+
+  tasks:
+    - name: Удаление конфликтных настроек
+      file:
+        path: "/etc/apt/sources.list.d/docker.list"
+        state: absent
+      ignore_errors: yes
+
+    - name: Удаление существующих ключей
+      file:
+        path: "/etc/apt/keyrings/docker.gpg"
+        state: absent
+      ignore_errors: yes
+
+
+    - name: Установка зависимостей Docker
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Добавляем GPG-ключ
+      apt_key:
+        url: "https://download.docker.com/linux/ubuntu/gpg"
+        state: present
+
+    - name: Добавляем Docker репозиторий
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: "docker-official"
+
+    - name: Устанавливаем Docker и необходимые пакеты
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Добавляем текущего пользователя в группу  
+      user:
+        name: "{{ user_name }}"
+        groups: docker
+        append: yes
+      notify:
+        - Reload user groups
+
+    - name: Проверяем успешность запуска службы
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Проверяем установку Docker и его версии
+      command: docker --version
+      register: docker_version_check
+      changed_when: false
+
+    - name: Выводим версию Docker
+      debug:
+        msg: "Docker успешно установлен: {{ docker_version_check.stdout }}"
+
+    - name: Копируем файлы..
+      copy:
+        src: "{{ item }}"
+        dest: "/tmp/"
+      loop:
+        - app/Dockerfile
+        - app/script.py
+
+    - name: Собираем образ..
+      command: docker build -t script /tmp
+      args:
+        chdir: /tmp
+      register: build_result
+      ignore_errors: yes
+
+    - name: Запускаем контейнера
+      command: docker run -d --name script script
+      register: container_run
+      ignore_errors: yes
+
+    - name: Проверяем запуск контейнера и обработку результатов
+      ansible.builtin.pause:
+        seconds: 5
+      when: container_run.changed
+
+    - name: Получение логов
+      command: docker logs script
+      register: container_logs
+      changed_when: false
+
+    - name: Вывод логов
+      debug:
+        var: container_logs.stderr_lines
+
+  handlers:
+    - name: Обновляем пользовательские группы
+      command: newgrp docker
+      listen: "Add current user to docker group"
